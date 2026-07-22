@@ -1,0 +1,1386 @@
+******************************** ESP32_DiY_firmware_V10 ********************************
+#include "DiY_URtool.h"
+#include "MotorControl.h"
+#include "EffectsEngine.h"
+
+byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0x01 };
+
+enum ToolStatusID {
+  NORMAL_MODE,
+  CONFIGURATION_MODE,
+  RESET_MODE,
+};
+
+ToolStatusID currentToolStatus = NORMAL_MODE;
+DiY_URtool ur(mac, 30002, 5);
+
+// --- PINS DEL SISTEMA ---
+#define PIN_ENCODER_A 32
+#define PIN_ENCODER_B 33
+#define PIN_PWM_MOTOR 25
+#define PIN_DIR1 26
+#define PIN_DIR2 27
+#define PIN_CORRENT 34  // ADC1, segur amb WiFi
+#define PIN_LEDS 22
+#define LED_COUNT 24
+
+EffectsEngine effects(LED_COUNT, PIN_LEDS);
+// Pins: A, B, PWM, Dir1, Dir2, Corrent
+MotorControl pinces(PIN_ENCODER_A, PIN_ENCODER_B, PIN_PWM_MOTOR, PIN_DIR1, PIN_DIR2, PIN_CORRENT);
+
+unsigned long old_time = 0;
+bool f_Open_Gripper = false;
+bool Open_Gripper_Old = false;
+bool f_Close_Gripper = false;
+bool Close_Gripper_Old = false;
+bool Openning_Gripper_Old = false;
+bool Closing_Gripper_Old = false;
+
+
+bool f_command = false;
+uint8_t old_command = 0;
+
+bool configStatus = false;
+uint8_t effect_old = 0;
+
+
+// Definició variables Digital Input
+const int buttonPin = 13;
+const unsigned long debounceDelay = 50;
+const unsigned long longPressTime = 2000;
+const unsigned long longPressResetTime = 10000;
+
+bool lastStableState = HIGH;
+bool lastReading = HIGH;
+unsigned long lastDebounceTime = 0;
+unsigned long pressStartTime = 0;
+bool longPressHandled = false;
+bool longPressResetHandled = false;
+
+
+
+void setup() {
+  Serial.begin(115200);
+  ur.begin();
+  pinces.begin();
+  effects.begin();
+
+  Serial.print("IP asignada: ");
+  Serial.println(Ethernet.localIP());
+
+  // Tuning (Sintonitza aquests valors!)
+  pinces.setPID(0.4, 0.05, 2.0);
+  pinces.setForceLimit(0.5);     // Màxim corrent permès
+  pinces.setGripThreshold(1.0);  // Corrent per detectar peça
+  pinces.setMaxAccel(8);
+  pinces.setDeadband(50);
+
+  pinMode(buttonPin, INPUT_PULLUP);
+}
+
+void loop() {
+  polling();
+
+  ur.handler();      // Supervision comunication over TCP/IP
+  pinces.handler();  // Supervision Gripper Motion Control
+  selectEffect();
+  gripperFunction();
+
+  switch (currentToolStatus) {
+    case NORMAL_MODE:
+      break;
+    case CONFIGURATION_MODE:
+      ur.handleSerialCommands();
+      break;
+    case RESET_MODE:
+      ESP.restart();
+      break;
+    default:
+      currentToolStatus = NORMAL_MODE;
+      break;
+  }
+
+
+  effects.update();  // Supervision Indicator Light Effects
+}
+
+void gripperFunction() {
+  if ((ur.getInByte(0) & 0x01) && !Open_Gripper_Old) {  // Open Flag detectet
+    //pinces.openGripper(map(ur.getInByte(2), 0, 255, 0, 100));
+    pinces.openGripper(ur.getInByte(2));
+  }
+  Open_Gripper_Old = ur.getInByte(0) & 0x01;
+  if ((ur.getInByte(0) & 0x02) && !Close_Gripper_Old) {  // Open Flag detectet
+    //pinces.openGripper(map(ur.getInByte(2), 0, 255, 0, 100));
+    pinces.closeGripper(ur.getInByte(2));
+  }
+  Close_Gripper_Old = ur.getInByte(0) & 0x02;
+
+  if ((ur.getInByte(0) & 0x04) && !Openning_Gripper_Old) {
+    Serial.println("Openning Press detectada!");
+    pinces.openGripperManual();
+  }
+  if (!(ur.getInByte(0) & 0x04) && Openning_Gripper_Old){
+    Serial.println("Opening Release detectada!");
+    pinces.stopGripper();
+  }
+  if ((ur.getInByte(0) & 0x04) && Openning_Gripper_Old) {
+    // Control dels límits
+    ;
+  }
+  if ((ur.getInByte(0) & 0x04)) Openning_Gripper_Old = true;
+  else Openning_Gripper_Old = false;
+
+  if ((ur.getInByte(0) & 0x08) && !Closing_Gripper_Old){
+    Serial.println("Closing Press detectada!");
+    pinces.closeGripperManual();
+  }
+  if (!(ur.getInByte(0) & 0x08) && Closing_Gripper_Old){
+    Serial.println("Closing Release detectada!");
+    pinces.stopGripper();
+  }
+  if ((ur.getInByte(0) & 0x08) && Closing_Gripper_Old) {
+    // Control dels límits
+    ;
+  }
+  if ((ur.getInByte(0) & 0x08)) Closing_Gripper_Old = true;
+  else Closing_Gripper_Old = false;
+  
+}
+
+void selectEffect() {
+  // EFFECTS LIGHT INDICATOR
+  uint8_t effect = ur.getInByte(3);
+  effects.setColor_1(ur.getInByte(5));
+  effects.setColor_2(ur.getInByte(6));
+  effects.setInterval(ur.getInByte(4));
+  effects.setBrightness(255);
+  //effects.setBrightness(ur.getInByte(7));
+  if (effect != effect_old) {
+
+    switch (effect) {
+      case 0:
+        effects.setEffect(NO_EFFECT);
+        break;
+
+      case 1:
+        effects.setEffect(EFFECT_SOLID);
+        break;
+
+      case 2:
+        effects.setEffect(EFFECT_BREATHING);
+        break;
+
+      case 3:
+        effects.setEffect(EFFECT_KNIGHT_RIDER);
+        break;
+
+      case 4:
+        effects.setEffect(EFFECT_POLICE);
+        break;
+
+      case 5:
+        effects.setEffect(EFFECT_FLASH);
+        break;
+      case 6:
+        effects.setEffect(EFFECT_RAINBOW);
+        break;
+
+      case 7:
+        effects.setEffect(EFFECT_ROLL_RING);
+        break;
+
+      default:
+        effects.setEffect(NO_EFFECT);
+        break;
+    }
+  }
+  effect_old = effect;
+}
+
+
+void polling() {
+  bool reading = digitalRead(buttonPin);
+
+  // Debounce
+  if (reading != lastReading) {
+    lastDebounceTime = millis();
+  }
+
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (reading != lastStableState) {
+      lastStableState = reading;
+
+      if (lastStableState == LOW) {  // Botó premut
+        pressStartTime = millis();
+        longPressHandled = false;
+        longPressResetHandled = false;
+      } else {  // Botó alliberat
+        longPressHandled = false;
+        longPressResetHandled = false;
+      }
+    }
+  }
+
+  // Comprovació de long press
+  if (lastStableState == LOW && !longPressHandled) {
+    if (millis() - pressStartTime >= longPressTime) {
+      onLongPress();
+      longPressHandled = true;  // Evita múltiples crides
+    }
+  }
+
+  // Comprovació de long press Reset
+  if (lastStableState == LOW && !longPressResetHandled) {
+    if (millis() - pressStartTime >= longPressResetTime) {
+      onLongPressReset();
+      longPressResetHandled = true;  // Evita múltiples crides
+    }
+  }
+
+  lastReading = reading;
+}
+
+void onLongPress() {
+  configStatus = !configStatus;
+  if (configStatus) {
+    currentToolStatus = CONFIGURATION_MODE;
+  } else {
+    currentToolStatus = NORMAL_MODE;
+  }
+}
+
+void onLongPressReset() {
+  currentToolStatus = RESET_MODE;
+}
+
+******************************** DiY_URtool.cpp ********************************
+#include "DiY_URtool.h"
+#include <SPI.h>
+
+// Helper function to parse IP from string
+IPAddress parseIP(String ipStr) {
+    IPAddress ip;
+    if (ip.fromString(ipStr)) {
+        return ip;
+    }
+    return IPAddress(0,0,0,0); // Return invalid IP on failure
+}
+
+// --------------------------------------------------
+// Constructor
+// --------------------------------------------------
+DiY_URtool::DiY_URtool(const byte* mac, uint16_t port, uint8_t csPin)
+: _port(port),
+  _csPin(csPin),
+  _server(port),
+  _lastCommunication(0),
+  _watchdogError(false)
+{
+    memcpy(_mac, mac, 6);
+
+    // Valors per defecte si EEPROM no existeix
+    _model = 1;          // Gripper Model
+    _firmware_A = 1;     // Firmware version
+    _firmware_B = 0;     // Firmware sub version
+
+    _localIp = IPAddress(192,168,1,50);
+    _gateway = IPAddress(192,168,1,1);
+    _subnet  = IPAddress(255,255,255,0);
+    
+
+    memset(_inBuf, 0, BUF_SIZE);
+    memset(_outBuf, 0, BUF_SIZE);
+}
+
+
+// --------------------------------------------------
+// Inici
+// --------------------------------------------------
+bool DiY_URtool::begin()
+{
+    EEPROM.begin(64);
+
+    loadNetworkConfig();
+    setOutByte(29, _model);
+    setOutByte(30, _firmware_A);
+    setOutByte(31, _firmware_B);
+
+    SPI.begin(18,19,23,_csPin);
+    Ethernet.init(_csPin);
+
+    // La crida original tenia el gateway repetit, s'ha corregit per utilitzar el DNS per defecte (0.0.0.0) o l'omissió.
+    // Usarem Ethernet.begin(_mac, _localIp, _gateway, _subnet);
+    // Nota: L'ESP32 Ethernet/Ethernet2 pot no donar suport al cinquè argument DNS.
+    Ethernet.begin(_mac, _localIp, _gateway, _subnet);
+
+    _server.begin();
+    _lastCommunication = millis();
+    _watchdogError = false;
+
+    Serial.print("DiY_URtool started. IP: ");
+    Serial.println(Ethernet.localIP());
+    Serial.println("Ready. Use 'STATUS' or 'IP <addr>' via Serial monitor.");
+
+    return true;
+}
+
+
+// --------------------------------------------------
+// Tick – a cridar a loop() (MODIFICAT PER ROBUSTESA WATCHDOG)
+// --------------------------------------------------
+void DiY_URtool::handler()
+{
+    // Acceptar client si no tenim
+    if (!clientConnected()) {
+        EthernetClient newClient = _server.available();
+
+        if (newClient) {
+            if (_client && _client.connected())
+                _client.stop();
+
+            _client = newClient;
+
+            //Serial.print("Client connected: ");
+            //Serial.println(_client.remoteIP());
+            
+            // Netejar l'estat del Watchdog quan hi ha una nova connexió (NOU)
+            resetWatchdog(); 
+        }
+        return;
+    }
+
+    // Llegir 32 bytes
+    uint8_t idx = 0;
+    unsigned long start = millis();
+
+    while (idx < BUF_SIZE && (millis() - start) < READ_TIMEOUT_MS)
+    {
+        if (_client.available()) {
+            int b = _client.read();
+            if (b >= 0)
+                _inBuf[idx++] = (uint8_t)b;
+        } else {
+            delay(1);
+        }
+    }
+
+    if (idx == BUF_SIZE)
+    {
+        // Comunicació OK: netegem l'error
+        _lastCommunication = millis();
+        _watchdogError = false;
+
+        processInput();
+
+        size_t sent = _client.write(_outBuf, BUF_SIZE);
+        _client.flush();
+
+        if (sent != BUF_SIZE) {
+            Serial.print("Warning: sent ");
+            Serial.print(sent);
+            Serial.println(" bytes");
+        }
+    }
+
+    // Watchdog (MODIFICAT)
+    if ((millis() - _lastCommunication) > WATCHDOG_TIMEOUT_MS)
+    {
+        if (!_watchdogError)
+        {
+            //Serial.println("WATCHDOG ERROR: No communication. Resetting buffers.");
+            _watchdogError = true; // Activar l'error (Estava comentat a la versió proporcionada)
+            
+            // Buidar buffers d'entrada i sortida quan salta el Watchdog (NOU)
+            memset(_inBuf, 0, BUF_SIZE);
+            memset(_outBuf, 0, BUF_SIZE);
+        }
+    }
+
+    // Si el client marxa
+    if (!_client.connected())
+    {
+        //Serial.println("Client disconnected");
+        resetClientState();
+    }
+}
+
+
+// --------------------------------------------------
+// Handle Serial Commands (NOU)
+// --------------------------------------------------
+void DiY_URtool::handleSerialCommands()
+{
+    if (Serial.available()) {
+        String input = Serial.readStringUntil('\n');
+        input.trim();
+        input.toUpperCase();
+
+        if (input.length() == 0) return;
+
+        Serial.print("> ");
+        Serial.println(input);
+        
+        int spaceIndex = input.indexOf(' ');
+        String command = (spaceIndex == -1) ? input : input.substring(0, spaceIndex);
+        String argument = (spaceIndex == -1) ? "" : input.substring(spaceIndex + 1);
+        argument.trim();
+
+        if (command == "STATUS") {
+            Serial.println("--- Configuració Ethernet Actual ---");
+            Serial.print("IP: "); Serial.println(_localIp);
+            Serial.print("MASK: "); Serial.println(_subnet);
+            Serial.print("GW: "); Serial.println(_gateway);
+            Serial.println("------------------------------------");
+        }
+        else if (command == "IP") {
+            IPAddress newIp = parseIP(argument);
+            if (newIp != IPAddress(0,0,0,0)) {
+                setIPAddress(newIp);
+                Serial.print("Nova IP temporal: "); Serial.println(_localIp);
+                Serial.println("Utilitza 'SAVE' per guardar. REINICIA per aplicar.");
+            } else {
+                Serial.println("Error: Format d'IP no vàlid. Format: IP 192.168.1.10");
+            }
+        }
+        else if (command == "MASK") {
+            IPAddress newMask = parseIP(argument);
+            if (newMask != IPAddress(0,0,0,0)) {
+                setSubnet(newMask);
+                Serial.print("Nova MASK temporal: "); Serial.println(_subnet);
+                Serial.println("Utilitza 'SAVE' per guardar. REINICIA per aplicar.");
+            } else {
+                Serial.println("Error: Format de MASK no vàlid. Format: MASK 255.255.255.0");
+            }
+        }
+        else if (command == "GW") {
+            IPAddress newGw = parseIP(argument);
+            if (newGw != IPAddress(0,0,0,0)) {
+                setGateway(newGw);
+                Serial.print("Nou GW temporal: "); Serial.println(_gateway);
+                Serial.println("Utilitza 'SAVE' per guardar. REINICIA per aplicar.");
+            } else {
+                Serial.println("Error: Format de GATEWAY no vàlid. Format: GW 192.168.1.1");
+            }
+        }
+        else if (command == "SAVE") {
+            saveNetworkConfig();
+            Serial.println("Configuració de xarxa guardada a l'EEPROM.");
+            Serial.println("REINICIA l'ESP32 per aplicar els canvis a Ethernet.");
+        }
+        else {
+            Serial.println("Comanda desconeguda. Comandes vàlides: STATUS, IP <addr>, MASK <addr>, GW <addr>, SAVE.");
+        }
+    }
+}
+
+
+// --------------------------------------------------
+// getWatchdogError 
+// --------------------------------------------------
+bool DiY_URtool::getWatchdogError()
+{
+    return _watchdogError;
+}
+
+
+// --------------------------------------------------
+// Process Input (substituïble per la teva lògica)
+// --------------------------------------------------
+void DiY_URtool::processInput()
+{
+    //memcpy(_outBuf, _inBuf, BUF_SIZE);
+    ;
+}
+
+
+// --------------------------------------------------
+// Buffer Access
+// --------------------------------------------------
+uint8_t DiY_URtool::getInByte(uint8_t index) const
+{
+    return (index < BUF_SIZE) ? _inBuf[index] : 0;
+}
+
+void DiY_URtool::setOutByte(uint8_t index, uint8_t value)
+{
+    if (index < BUF_SIZE)
+        _outBuf[index] = value;
+}
+
+void DiY_URtool::readInputBuffer(uint8_t *dst, uint8_t len) const
+{
+    memcpy(dst, _inBuf, (len < BUF_SIZE ? len : BUF_SIZE));
+}
+
+void DiY_URtool::writeOutputBuffer(const uint8_t *src, uint8_t len)
+{
+    memcpy(_outBuf, src, (len < BUF_SIZE ? len : BUF_SIZE));
+}
+
+
+// --------------------------------------------------
+// Communication status
+// --------------------------------------------------
+bool DiY_URtool::clientConnected()
+{
+    return (_client && _client.connected());
+}
+
+bool DiY_URtool::commOk() const
+{
+    return !_watchdogError;
+}
+
+void DiY_URtool::resetWatchdog()
+{
+    _watchdogError = false;
+    _lastCommunication = millis();
+}
+
+
+// --------------------------------------------------
+// Reset client
+// --------------------------------------------------
+void DiY_URtool::resetClientState()
+{
+    if (_client)
+        _client.stop();
+
+    //memset(_inBuf, 0, BUF_SIZE);
+    //memset(_outBuf, 0, BUF_SIZE);
+
+    _lastCommunication = millis();
+    _watchdogError = false;
+}
+
+
+// --------------------------------------------------
+// EEPROM Save / Load (robust, byte a byte)
+// --------------------------------------------------
+void DiY_URtool::saveNetworkConfig()
+{
+    EEPROM.write(EEPROM_BASE + 0, _localIp[0]);
+    EEPROM.write(EEPROM_BASE + 1, _localIp[1]);
+    EEPROM.write(EEPROM_BASE + 2, _localIp[2]);
+    EEPROM.write(EEPROM_BASE + 3, _localIp[3]);
+
+    EEPROM.write(EEPROM_BASE + 4, _subnet[0]);
+    EEPROM.write(EEPROM_BASE + 5, _subnet[1]);
+    EEPROM.write(EEPROM_BASE + 6, _subnet[2]);
+    EEPROM.write(EEPROM_BASE + 7, _subnet[3]);
+
+    EEPROM.write(EEPROM_BASE + 8,  _gateway[0]);
+    EEPROM.write(EEPROM_BASE + 9,  _gateway[1]);
+    EEPROM.write(EEPROM_BASE + 10, _gateway[2]);
+    EEPROM.write(EEPROM_BASE + 11, _gateway[3]);
+
+    EEPROM.write(EEPROM_BASE + 12, _model);
+    EEPROM.write(EEPROM_BASE + 13, _firmware_A);
+    EEPROM.write(EEPROM_BASE + 14, _firmware_B);
+
+    EEPROM.write(EEPROM_BASE + 15, EEPROM_SIGNATURE);
+
+    EEPROM.commit();
+}
+
+void DiY_URtool::loadNetworkConfig()
+{
+    uint8_t sig = EEPROM.read(EEPROM_BASE + 15);
+
+    if (sig != EEPROM_SIGNATURE)
+    {
+        Serial.println("EEPROM empty: saving defaults");
+        saveNetworkConfig();
+        return;
+    }
+
+    _localIp = IPAddress(
+        EEPROM.read(EEPROM_BASE + 0),
+        EEPROM.read(EEPROM_BASE + 1),
+        EEPROM.read(EEPROM_BASE + 2),
+        EEPROM.read(EEPROM_BASE + 3)
+    );
+
+    _subnet = IPAddress(
+        EEPROM.read(EEPROM_BASE + 4),
+        EEPROM.read(EEPROM_BASE + 5),
+        EEPROM.read(EEPROM_BASE + 6),
+        EEPROM.read(EEPROM_BASE + 7)
+    );
+
+    _gateway = IPAddress(
+        EEPROM.read(EEPROM_BASE + 8),
+        EEPROM.read(EEPROM_BASE + 9),
+        EEPROM.read(EEPROM_BASE + 10),
+        EEPROM.read(EEPROM_BASE + 11)
+    );
+
+    _model = EEPROM.read(EEPROM_BASE + 12);
+    _firmware_A = EEPROM.read(EEPROM_BASE + 13);
+    _firmware_B = EEPROM.read(EEPROM_BASE + 14);
+
+    Serial.println("Network config loaded from EEPROM:");
+    Serial.print(" IP: ");   Serial.println(_localIp);
+    Serial.print(" MASK: "); Serial.println(_subnet);
+    Serial.print(" GW: ");   Serial.println(_model);
+    Serial.print(" DiY_URtool Model: ");   Serial.println(_gateway);
+    Serial.print(" Firmware version: ");   Serial.print(_firmware_A); Serial.print("."); Serial.println(_firmware_B);
+}
+
+
+// --------------------------------------------------
+// Setters & Getters
+// --------------------------------------------------
+void DiY_URtool::setIPAddress(IPAddress ip)  { _localIp = ip; }
+void DiY_URtool::setGateway(IPAddress gw)    { _gateway = gw; }
+void DiY_URtool::setSubnet(IPAddress sn)     { _subnet = sn; }
+
+IPAddress DiY_URtool::getIPAddress() const   { return _localIp; }
+IPAddress DiY_URtool::getGateway() const     { return _gateway; }
+IPAddress DiY_URtool::getSubnet() const      { return _subnet; }  
+
+******************************** DiY_URtool.h ********************************
+#pragma once
+#include <Arduino.h>
+#include <Ethernet.h>
+#include <EEPROM.h>
+
+class DiY_URtool
+{
+public:
+    static const uint8_t BUF_SIZE = 32;
+
+    DiY_URtool(const byte* mac, uint16_t port, uint8_t csPin);
+
+    bool begin();
+    void handler();
+
+    // Buffer access
+    uint8_t getInByte(uint8_t index) const;
+    void setOutByte(uint8_t index, uint8_t value);
+
+    void readInputBuffer(uint8_t *dst, uint8_t len) const;
+    void writeOutputBuffer(const uint8_t *src, uint8_t len);
+
+    bool clientConnected();
+    bool commOk() const;
+
+    // Watchdog
+    void resetWatchdog();
+
+    // Network config (EEPROM)
+    void saveNetworkConfig();
+    void loadNetworkConfig();
+
+    // Comandes de xarxa
+    void setIPAddress(IPAddress ip);
+    void setGateway(IPAddress gw);
+    void setSubnet(IPAddress sn);
+    
+    // NOU: Funció per gestionar les comandes rebudes pel port sèrie
+    void handleSerialCommands();
+
+    bool getWatchdogError(void);
+
+    IPAddress getIPAddress() const;
+    IPAddress getGateway() const;
+    IPAddress getSubnet() const;
+
+private:
+    void processInput();
+    void resetClientState();
+
+private:
+    byte _mac[6];
+    uint16_t _port;
+    uint8_t _csPin;
+
+    EthernetServer _server;
+    EthernetClient _client;
+
+    IPAddress   _localIp;
+    IPAddress   _gateway;
+    IPAddress   _subnet;
+    uint8_t       _model;
+    uint8_t       _firmware_A;
+    uint8_t       _firmware_B;
+
+    uint8_t _inBuf[BUF_SIZE];
+    uint8_t _outBuf[BUF_SIZE];
+
+    unsigned long _lastCommunication;
+    bool _watchdogError;
+
+    static const uint32_t WATCHDOG_TIMEOUT_MS = 3000;   // 3s sense comunicació
+    static const uint32_t READ_TIMEOUT_MS     = 100;    // Timeout lectura
+
+    // EEPROM layout
+    static const uint8_t EEPROM_SIGNATURE = 0xA5;
+    static const uint16_t EEPROM_BASE     = 0;
+};
+
+******************************** EffectsEngine.cpp ********************************
+#include "EffectsEngine.h"
+
+// Definició de la taula estàtica amb 16 colors RGB
+
+
+
+EffectsEngine::EffectsEngine(uint8_t num_leds, uint8_t pin)
+  : strip(num_leds, pin, NEO_GRB + NEO_KHZ800), numLeds(num_leds) {
+  currentEffect = NO_EFFECT;
+  timer = 0;
+  interval = 30;
+  index = 0;
+  brightness = 0;
+  Color_1 = 0;
+  Color_2 = 0;
+  dir = 1;
+  SinusCounter = 0;
+}
+
+
+void EffectsEngine::begin() {
+  strip.begin();
+  strip.show();  // Initialize all pixels to 'off'
+
+  //setEffect(NO_EFFECT);
+}
+
+void EffectsEngine::setEffect(EffectID id) {
+  currentEffect = id;
+}
+
+void EffectsEngine::setColor_1(uint8_t c) {
+  Color_1 = c;
+}
+
+void EffectsEngine::setColor_2(uint8_t c) {
+  Color_2 = c;
+}
+
+void EffectsEngine::setInterval(uint8_t i) {
+  interval = i;
+}
+
+void EffectsEngine::setBrightness(uint8_t i) {
+  brightness = i;
+}
+
+
+void EffectsEngine::update() {
+
+  if (millis() - timer >= interval) {
+    timer = millis();
+
+    switch (currentEffect) {
+      case NO_EFFECT: effect_no_effect(); break;
+      case EFFECT_SOLID: effect_solid(); break;
+      case EFFECT_BREATHING: effect_breathing(); break;
+      case EFFECT_KNIGHT_RIDER: effect_knight_rider(); break;
+      case EFFECT_POLICE: effect_police(); break;
+      case EFFECT_FLASH: effect_flash(); break;
+      case EFFECT_RAINBOW: effect_rainbow(); break;
+      case EFFECT_ROLL_RING: effect_roll_ring(); break;
+    }
+  }
+}
+
+// definició taula de colors
+const uint8_t EffectsEngine::Color[16][3] = {
+  { 255, 0, 0 },      // 0: Vermell
+  { 0, 255, 0 },      // 1: Verd
+  { 0, 0, 255 },      // 2: Blau
+  { 255, 255, 0 },    // 3: Groc
+  { 255, 0, 255 },    // 4: Magenta
+  { 0, 255, 255 },    // 5: Cian
+  { 255, 128, 0 },    // 6: Taronja
+  { 128, 0, 255 },    // 7: Violeta
+  { 255, 255, 255 },  // 8: Blanc
+  { 100, 100, 100 },  // 9: Gris
+  { 50, 0, 0 },       // 10: Vermell fosc
+  { 0, 50, 0 },       // 11: Verd fosc
+  { 0, 0, 50 },       // 12: Blau fosc
+  { 255, 105, 180 },  // 13: Rosa
+  { 139, 69, 19 },    // 14: Marró
+  { 0, 0, 0 }         // 15: Apagat (Negre)
+};
+
+//   E F F E C T S  //
+
+void EffectsEngine::effect_no_effect() {
+  strip.clear();
+  strip.show();
+}
+
+void EffectsEngine::effect_solid() {
+  if (Color_1 >= 0 && Color_1 < 16) {
+    uint8_t r = Color[Color_1][0];
+    uint8_t g = Color[Color_1][1];
+    uint8_t b = Color[Color_1][2];
+
+    for (int i = 0; i < numLeds; i++) {
+      strip.setPixelColor(i, strip.Color(r, g, b));
+    }
+    strip.setBrightness(brightness);
+    strip.show();
+  }
+}
+
+void EffectsEngine::effect_breathing() {
+  strip.setBrightness(sine_table[SinusCounter]);
+  
+  for (int i = 0; i < strip.numPixels(); i++)
+    strip.setPixelColor(i, strip.Color(0, 0, 255));
+
+  strip.show();
+  SinusCounter++;
+  if (SinusCounter>=100) SinusCounter=0;
+
+  
+  /*
+  brightness += dir;
+  if (brightness < 10) brightness = 10;
+
+  if (brightness >= 150 || brightness <= 10)
+    dir = -dir;
+  */
+
+
+}
+
+void EffectsEngine::effect_knight_rider() {
+  // 1. Efecte d'esvaïment (fade) per crear la cua
+  // Això fa que els LEDs no s'apaguin de cop, sinó que perdin intensitat
+  for (int i = 0; i < strip.numPixels(); i++) {
+    uint32_t c = strip.getPixelColor(i);
+    uint8_t r = (uint8_t)(c >> 16);
+    uint8_t g = (uint8_t)(c >> 8);
+    uint8_t b = c;
+    // Reduïm el color vermell un 40% a cada cicle per crear el rastre
+    strip.setPixelColor(i, strip.Color(r * 0.6, g * 0.6, b * 0.6));
+  }
+
+  // 2. Dibuixem el "cap" de l'escàner
+  if (Color_1 >= 0 && Color_1 < 16) {
+    uint8_t r = Color[Color_1][0];
+    uint8_t g = Color[Color_1][1];
+    uint8_t b = Color[Color_1][2];
+    strip.setPixelColor(index, strip.Color(r, g, b));
+  }
+
+  strip.show();
+
+  // 3. Actualitzem la posició per a la propera crida
+  index++;
+
+  // 4. Inicialitzaem índex en acabar l'anell
+  if (index >= (strip.numPixels())) {
+    index = 0;
+  }
+}
+
+void EffectsEngine::effect_police() {
+    uint8_t r1 = Color[Color_1][0], g1 = Color[Color_1][1], b1 = Color[Color_1][2];
+    uint8_t r2 = Color[Color_2][0], g2 = Color[Color_2][1], b2 = Color[Color_2][2];
+
+    for (int i = 0; i < numLeds; i++) {
+        // Determinem en quina meitat està el LED segons la posició de l'índex
+        if ((i + index) % numLeds < (numLeds / 2)) {
+            strip.setPixelColor(i, strip.Color(r1, g1, b1));
+        } else {
+            strip.setPixelColor(i, strip.Color(r2, g2, b2));
+        }
+    }
+    strip.setBrightness(brightness);
+    strip.show();
+    index = (index + 1) % numLeds; // Fa girar el patró
+}
+
+void EffectsEngine::effect_flash() {
+    if (index % 2 == 0) {
+        // Encenem tot l'anell amb Color_1
+        uint8_t r = Color[Color_1][0], g = Color[Color_1][1], b = Color[Color_1][2];
+        for (int i = 0; i < numLeds; i++) strip.setPixelColor(i, strip.Color(r, g, b));
+    } else {
+        // Apaguem les llums per crear l'efecte parpelleig
+        strip.clear();
+    }
+    strip.setBrightness(brightness);
+    strip.show();
+    index++; 
+}
+
+void EffectsEngine::effect_rainbow() {
+    // 1. Recorrem tots els LEDs
+    for (int i = 0; i < strip.numPixels(); i++) {
+        // 2. Calculem el color (Hue) de cada LED. 
+        // L'ús d''index' aquí és el que permet que el color canviï de posició.
+        uint32_t pixelHue = index + (i * 65536L / strip.numPixels());
+        
+        // 3. Assignem el color amb correcció gamma per a millor qualitat visual
+        strip.setPixelColor(i, strip.gamma32(strip.ColorHSV(pixelHue)));
+    }
+    
+    // 4. Mostrem els canvis a l'anell
+    strip.setBrightness(brightness);
+    strip.show();
+    
+    // 5. INCREMENT CRÍTIC: Sense això, l'arc de Sant Martí no gira
+    // Afegim un valor a 'index' per desplaçar els colors en el proper 'update'
+    index += 256; 
+}
+
+void EffectsEngine::effect_roll_ring() {
+    uint8_t r = Color[Color_1][0], g = Color[Color_1][1], b = Color[Color_1][2];
+    strip.clear(); // Comencem amb tot apagat per dibuixar només els actius
+
+    for (int i = 0; i < numLeds; i++) {
+        // Si la posició relativa a l'índex és múltiple de 4, l'encenem
+        if ((i + index) % 4 == 0) {
+            strip.setPixelColor(i, strip.Color(r, g, b));
+        }
+    }
+    strip.setBrightness(brightness);
+    strip.show();
+    index = (index + 1) % numLeds; // Velocitat de gir segons la variable interval
+}
+
+******************************** EffectsEngine.h ********************************
+#ifndef EFFECTS_ENGINE_H
+#define EFFECTS_ENGINE_H
+
+#include <Adafruit_NeoPixel.h>
+
+const uint8_t sine_table[100] = {
+  127, 135, 143, 151, 159, 166, 174, 181, 188, 195,
+  201, 207, 213, 219, 224, 229, 234, 238, 241, 245,
+  247, 250, 251, 253, 254, 254, 254, 253, 251, 250,
+  247, 245, 241, 238, 234, 229, 224, 219, 213, 207,
+  201, 195, 188, 181, 174, 166, 159, 151, 143, 135,
+  127, 119, 111, 103, 95,  88,  80,  73,  66,  59,
+  53,  47,  41,  35,  30,  25,  20,  16,  13,  9,
+  7,   4,   3,   1,   0,   0,   0,   1,   3,   4,
+  7,   9,   13,  16,  20,  25,  30,  35,  41,  47,
+  53,  59,  66,  73,  80,  88,  95,  103, 111, 119
+};
+
+
+
+enum EffectID
+{
+    NO_EFFECT,
+    EFFECT_SOLID,
+    EFFECT_BREATHING,
+    EFFECT_KNIGHT_RIDER,
+    EFFECT_POLICE,
+    EFFECT_FLASH,
+    EFFECT_RAINBOW,
+    EFFECT_ROLL_RING,
+};
+
+
+class EffectsEngine
+{
+public:
+
+    EffectsEngine(uint8_t num_leds, uint8_t pin);
+
+    void setEffect(EffectID id);
+    void update();
+    void begin();
+    void setColor_1(uint8_t c);
+    void setColor_2(uint8_t c);
+    void setInterval(uint8_t i);
+    void setBrightness(uint8_t i);
+
+private:
+
+    Adafruit_NeoPixel strip;
+    int numLeds;
+    EffectID currentEffect;
+    unsigned long timer;
+    uint8_t interval;
+    uint16_t index;
+    uint8_t brightness;
+    uint8_t Color_1;
+    uint8_t Color_2;
+    uint8_t SinusCounter;
+    int dir;
+    static const uint8_t Color[16][3]; // Declaració de la taula de colors 16x3
+    void effect_no_effect();
+    void effect_solid();
+    void effect_breathing();
+    void effect_knight_rider();
+    void effect_police();
+    void effect_flash();
+    void effect_rainbow();
+    void effect_roll_ring();
+};
+
+#endif
+
+******************************** MotorControl.cpp ********************************
+#include "MotorControl.h"
+
+MotorControl::MotorControl(uint8_t pA, uint8_t pB, uint8_t pPWM, uint8_t pD1, uint8_t pD2, uint8_t pCurr)
+  : pinA(pA), pinB(pB), pinPWM(pPWM), pinDir1(pD1), pinDir2(pD2), pinCorrent(pCurr) {
+  targetPos = 0;
+  Kp = 1.0;
+  Ki = 0.0;
+  Kd = 0.0;
+  errorIntegral = 0;
+  errorAnterior = 0;
+  correntLimit = 0.8;
+  correntHoming = 0.3;
+  correntLimitOpen = 0.3;
+  correntLimitClose = 0.15;
+  gripCurrentThreshold = 0.5;
+  maxAccel = 5;
+  currentPwm = 0;
+  currentState = HOMING;
+  deadband = 15;  // Valor per defecte
+  firstStateCycle = true;
+  overCurrent = false;
+  movingTimeOut = 3800;  //(5 segons)
+  lastTimeCounter = 0;
+}
+
+void MotorControl::begin() {
+  pinMode(pinDir1, OUTPUT);
+  pinMode(pinDir2, OUTPUT);
+
+  // Inicialitzem l'encoder amb la llibreria (sense ISR!)
+  encoder.attachFullQuad(pinA, pinB);
+  encoder.setCount(0);
+
+  ledcAttach(pinPWM, freq, resolucio);
+}
+
+void MotorControl::home() {
+  currentState = HOMING;
+  firstStateCycle = true;
+  setTarget(-50000);
+}
+
+void MotorControl::setPID(float p, float i, float d) {
+  Kp = p;
+  Ki = i;
+  Kd = d;
+}
+void MotorControl::setKp(float p) {
+  Kp = p;
+}
+void MotorControl::setKi(float i) {
+  Ki = i;
+}
+void MotorControl::setKd(float d) {
+  Kd = d;
+}
+void MotorControl::setTarget(long target) {
+  targetPos = target;
+  errorIntegral = 0;
+}
+void MotorControl::setForceLimit(float amps) {
+  correntLimit = amps;
+}
+void MotorControl::setGripThreshold(float amps) {
+  gripCurrentThreshold = amps;
+}
+void MotorControl::setMaxAccel(int accel) {
+  maxAccel = accel;
+}
+
+long MotorControl::getPosition() {
+  return (long)encoder.getCount();
+}
+
+float MotorControl::getCurrent() {
+  // Mitjana mòbil per eliminar soroll elèctric (Software Filter)
+    long adcSum = 0;
+    for(int i = 0; i < 8; i++) {
+        adcSum += analogRead(pinCorrent);
+    }
+    return ((adcSum >> 3) * AnalogToVoltage);
+    //return ((adcSum / 8.0) * 3.3 / 4095.0);
+
+  //currentSum = (currentSum + (analogRead(pinCorrent) / 500.0)) * 0.5;
+  //return ((adcSum / 8.0) / 500.0);
+  //return currentSum;
+}
+
+float MotorControl::getCurrentSum() {
+  return currentSum;
+}
+
+void MotorControl::setDeadband(int val) {
+  deadband = val;
+}
+
+long MotorControl::directConvert(int percent) {
+  if (percent > 100) percent = 100;
+  if (percent < 0) percent = 0;
+  return 17000L - (long)percent * 170L;
+}
+
+int MotorControl::inversConvert(long ticks) {
+  if (ticks > 17000) ticks = 17000;
+  if (ticks < 0) ticks = 0;
+  return (17000L - ticks) / 170L;
+}
+
+void MotorControl::stopGripper() {
+  setTarget(encoder.getCount());
+  ledcWrite(pinPWM, 0);
+  digitalWrite(pinDir1, LOW);
+  digitalWrite(pinDir2, LOW);
+  currentPwm = 0;
+  errorIntegral = 0;  // Netejem l'integral perquè no s'acumuli mentres parem
+  currentState = IDLE;
+}
+
+void MotorControl::openGripper(int pos) {
+  if (pos > 100) pos = 100;
+  if (pos < 0) pos = 0;
+  setTarget(directConvert(pos));
+  currentState = OPENING;
+  firstStateCycle = true;
+}
+void MotorControl::openGripperManual(){
+  currentState = MANUAL_OPEN;
+}
+
+void MotorControl::closeGripper(int pos) {
+  if (pos > 100) pos = 100;
+  if (pos < 0) pos = 0;
+  setTarget(directConvert(pos));
+  currentState = CLOSING;
+  firstStateCycle = true;
+}
+
+void MotorControl::closeGripperManual(){
+  currentState = MANUAL_CLOSE;
+}
+
+void MotorControl::handler() {
+  if (millis() - lastTick >= 10) {
+    lastTick = millis();
+    float current = getCurrent();
+    long posicio = getPosition();  // Obtenim posició del hardware PCNT
+    long error = targetPos - posicio;
+
+    // 1. Lògica Homing
+    if (currentState == HOMING) {
+
+      if (firstStateCycle) {
+        firstStateCycle = false;
+        lastTimeCounter = millis();
+        setTarget(-50000);
+      }
+
+      if (millis() - lastTimeCounter > 400) {
+        if (((current > correntHoming) || (millis() - lastTimeCounter > movingTimeOut)) && !overCurrent) {
+          overCurrent = true;
+          encoder.setCount(-2000);
+          setTarget(0);
+        }
+        if (overCurrent) {
+          // --- LA ZONA MORTA ---
+          if (abs(error) <= deadband) {
+            // Estem prou a prop, parem el control
+            stopGripper();
+            overCurrent = false;
+            //Serial.println("HOMING Done");
+            return;  // Sortim del handler, no cal calcular PID
+          }
+        }
+      }
+    }
+
+    // 2. Lògica IDLE
+    if (currentState == IDLE) {
+      ;
+    }
+
+    // 3. Lògica CLOSING
+    if (currentState == CLOSING) {
+      if (firstStateCycle) {
+        firstStateCycle = false;
+        lastTimeCounter = millis();
+      }
+      if (millis() - lastTimeCounter > 400) {
+        if (current > correntLimitClose) {
+          //Serial.printf("overCurrent detectat -> setPoint:%d, actualPos:%d\n", inversConvert(targetPos), inversConvert(getPosition()));
+          stopGripper();
+          return;  // Sortim del handler, no cal calcular PID
+        }
+        if (millis() - lastTimeCounter > movingTimeOut) {
+        //Serial.printf("timeOut detectat -> setPoint:%d, actualPos:%d\n", inversConvert(targetPos), inversConvert(getPosition()));
+          stopGripper();
+          return;  // Sortim del handler, no cal calcular PID
+        }
+      }
+      if (abs(error) <= deadband) {
+        // Estem prou a prop, parem el control
+        //Serial.println("CLOSING Done");
+        stopGripper();
+        return;  // Sortim del handler, no cal calcular PID
+      }
+    }
+
+    // 4. Lògica OPENING
+    if (currentState == OPENING) {
+      if (firstStateCycle) {
+        firstStateCycle = false;
+        lastTimeCounter = millis();
+      }
+      if (millis() - lastTimeCounter > 400) {
+        if (current > correntLimitOpen) {
+          //Serial.printf("overCurrent detectat -> setPoint:%d, actualPos:%d\n", inversConvert(targetPos), inversConvert(getPosition()));
+          stopGripper();
+          return;  // Sortim del handler, no cal calcular PID
+        }
+        if (millis() - lastTimeCounter > movingTimeOut) {
+          //Serial.printf("timeOut detectat -> setPoint:%d, actualPos:%d\n", inversConvert(targetPos), inversConvert(getPosition()));
+          stopGripper();
+          return;  // Sortim del handler, no cal calcular PID
+        }
+      }
+      if (abs(error) <= deadband) {
+        // Estem prou a prop, parem el control
+        //Serial.println("OPENING Done");
+        stopGripper();
+        return;  // Sortim del handler, no cal calcular PID
+      }
+    }
+
+    
+    // 5. Seguretat: Control de sobrecorrent
+    if (current > correntLimit) {
+      stopGripper();
+      return;  // Sortim del handler, no cal calcular PID
+    }
+
+
+    // 6. PID
+    if (currentState != IDLE && currentState != MANUAL_CLOSE && currentState != MANUAL_OPEN) {
+      errorIntegral = constrain(errorIntegral + error, -500, 500);
+      float pidOutput = (Kp * error) + (Ki * errorIntegral) + (Kd * (error - errorAnterior));
+      errorAnterior = error;
+      pidOutput = constrain(pidOutput, -255, 255);  // Important per no saturar
+
+      // 5. Rampa
+      int targetPwm = (int)pidOutput;
+      int diff = targetPwm - currentPwm;
+      if (diff > maxAccel) diff = maxAccel;
+      else if (diff < -maxAccel) diff = -maxAccel;
+      currentPwm += diff;
+    }
+
+
+    // 7. Sortida
+    int pwmMagnitude = constrain(abs(currentPwm), 0, 255);
+    if (currentPwm > 0) {
+      digitalWrite(pinDir1, HIGH);
+      digitalWrite(pinDir2, LOW);
+    } else if (currentPwm < 0) {
+      digitalWrite(pinDir1, LOW);
+      digitalWrite(pinDir2, HIGH);
+    } else {
+      digitalWrite(pinDir1, LOW);
+      digitalWrite(pinDir2, LOW);
+    }
+    ledcWrite(pinPWM, pwmMagnitude);
+
+       // Lògica CLOSE MANUAL
+    if (currentState == MANUAL_CLOSE) {
+        ledcWrite(pinPWM, 255);
+        digitalWrite(pinDir1, HIGH);
+        digitalWrite(pinDir2, LOW);
+    }
+
+    // Lògica OPEN MANUAL
+    if (currentState == MANUAL_OPEN) {
+        ledcWrite(pinPWM, 255);
+        digitalWrite(pinDir1, LOW);
+        digitalWrite(pinDir2, HIGH);
+    }
+
+  }
+
+}
+
+******************************** MotorControl.h ********************************
+#ifndef MOTOR_CONTROL_H
+#define MOTOR_CONTROL_H
+
+#include <Arduino.h>
+#include <ESP32Encoder.h>
+
+enum GripperState { IDLE, CLOSING, OPENING, MOVING, GRIPPED, NO_OBJECT, HOMING, MANUAL_CLOSE, MANUAL_OPEN };
+
+class MotorControl {
+public:
+    MotorControl(uint8_t pA, uint8_t pB, uint8_t pPWM, uint8_t pD1, uint8_t pD2, uint8_t pCurr);
+    
+    void begin();
+    void setPID(float p, float i, float d);
+    void setKp(float p);
+    void setKi(float i);
+    void setKd(float d);
+    void setTarget(long target);
+    void setForceLimit(float amps);
+    void setGripThreshold(float amps);
+    void setMaxAccel(int accel);
+    void home();
+    void handler();
+    void setDeadband(int val);
+    void stopGripper();
+    void openGripper(int pos);
+    void closeGripper(int pos);
+    void openGripperManual();
+    void closeGripperManual();
+    long directConvert(int percent);
+    int inversConvert(long ticks);
+    
+    long getPosition();
+    long getTarget() { return targetPos; }
+    GripperState getState() { return currentState; }
+    float getCurrent();
+    float getCurrentSum();
+    
+
+private:
+    uint8_t pinA, pinB, pinPWM, pinDir1, pinDir2, pinCorrent;
+    ESP32Encoder encoder; // Ara l'encoder és part de la classe
+    
+    // PID & Control
+    float Kp, Ki, Kd;
+    float errorIntegral, errorAnterior;
+    long targetPos;
+    
+    float correntHoming;
+    float correntLimit;
+    float correntLimitOpen;
+    float correntLimitClose;
+    float currentSum;
+    bool overCurrent;
+    float gripCurrentThreshold;
+    GripperState currentState;
+    bool firstStateCycle=true;
+    int posTolerance = 10;
+    unsigned long lastTimeCounter;
+    unsigned long movingTimeOut;
+    unsigned long lastTick = 0; 
+    
+    int maxAccel;
+    int currentPwm;
+    int deadband;
+
+    const int freq = 1000;
+    const int resolucio = 8;
+    const float AnalogToVoltage = 3.3 / 4095;
+};
+
+#endif

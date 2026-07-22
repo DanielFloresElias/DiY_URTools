@@ -1,0 +1,18 @@
+Aquesta versió incorpora la possibilitat de modificar la configuración de xarxa mitjançant comandes pel port Sèrie.
+
+Com utilitzar les noves comandes Serial
+1.Carrega el codi a l'ESP32.
+2. Obre el Monitor Serial (a 115200 baudis).
+3. Escriu una de les següents comandes i prem ENTER:
+
+Comanda			Funció									Exemple
+
+STATUS			Mostra la configuració IP, MASK i Gateway actualment carregada.		STATUS
+
+IP <adreça>		Canvia temporalment l'adreça IP de l'eina.				IP 192.168.5.100
+
+MASK <adreça>		Canvia temporalment la Subnet Mask.					MASK 255.255.0.0
+
+GW <adreça>		Canvia temporalment el Gateway.						GW 192.168.5.1
+
+SAVE			Guarda permanentment la configuració temporal a l'EEPROM.SAVEREINICIA (Manual)Després de SAVE, has de reiniciar l'ESP32 per aplicar la nova configuració d'Ethernet.(Prem el botó RESET)
