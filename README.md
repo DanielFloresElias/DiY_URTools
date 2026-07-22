@@ -17,6 +17,7 @@ El objetivo principal ha sido desarrollar un ecosistema de herramientas funciona
 *   `firmware/`: Código C++ para el sistema de control.
 *   `software/`: Código de las URCaps y app de configuración.
 *   `mecanica/`: Modelos 3D para impresión.
+*   `URcaps/`: URcaps para instalar en Polyscope.
 
 ## 👥 Centros Participantes
 Este proyecto ha sido una colaboración entre:
